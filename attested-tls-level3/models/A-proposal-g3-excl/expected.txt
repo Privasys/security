@@ -1,0 +1,4 @@
+event(ClientStateEv(ev,gxy1)) && event(ServerStateEv(ev,gxy2)) ==> gxy1 = gxy2 is true.
+event(ClientStateEvKch(ev,kch1)) && event(ServerStateEvKch(ev,kch2)) ==> kch1 = kch2 is true.
+event(ClientStateEvKc(ev,kc1)) && event(ServerStateEvKc(ev,kc2)) ==> kc1 = kc2 || event(ServerChoosesKEX(cr_2,sr_2,DHE_13(WeakDH,e))) || event(ServerChoosesHash(cr',sr',WeakHash)) || event(SentBadElement) is true.
+event(ClientStateEvKc(ev,kc1)) && event(ServerStateEvKc(ev,kc2)) ==> kc1 = kc2 || event(ServerChoosesKEX(cr_2,sr_2,DHE_13(WeakDH,e))) || event(ServerChoosesHash(cr',sr',WeakHash)) || event(SentBadElement) || event(LeakedAK(pubAK_5)) || event(LeakedEK(pubEK_6)) || event(LeakedLTK(pubLTK_6)) is true.

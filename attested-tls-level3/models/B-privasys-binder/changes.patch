@@ -1,0 +1,30 @@
+--- upstream/proposal/tls-lib-simple.pvl
++++ B-privasys-binder/tls-lib-simple.pvl
+@@ -193,6 +193,7 @@
+ 
+   tls13_h_exp_master, (* represents label "h exp master" for cryptographic binding *)
+   tls13_ra_binder, (* represents label "ra binder" for cryptographic binding *)
++  tls13_privasys_binder, (* Privasys: label "privasys-ratls-binder-v1" *)
+   user_defined,  (* user-defined for exporter *)
+ 
+   tls13_exporter: label.  (* represents label "exporter" *)
+@@ -252,10 +253,15 @@
+        derive_secret(ms,tls13_resumption_master_secret,log4).  (* represents resumption_master_secret in the Key Schedule [Sec. 7.1, RFC8446] *)
+ 
+ (* Proposed exporter for cryptographic binding *)
+-letfun kdf_exp(hs:bitstring, log2:bitstring) =  (* 1st parameter represents Handshake Secret as salt; 2nd parameter represents messages ClientHello...ServerHello for derive_secret *)
+-  let hes = derive_secret(hs, tls13_h_exp_master, log2) in
+-  let ik1 = derive_secret(hes, tls13_ra_binder, zero) in
+-  hkdf_expand_label(ik1, tls13_exporter, hash_ideal(context_value2)).
++(* Privasys RA-TLS channel binder (rustls + Go forks, shipped 2026-07):
++   binder = HKDF-Expand-Label(client_handshake_traffic_secret,
++                              "privasys-ratls-binder-v1", Hash(ClientHello..ServerHello), 32)
++   client_handshake_traffic_secret = Derive-Secret(Handshake Secret, "c hs traffic", CH..SH)
++   Folded into the AK-signed quote report_data together with the client nonce and
++   the leaf public key: rdata = (ar, cb, pubEK) below. *)
++letfun kdf_exp(hs:bitstring, log2:bitstring) =
++  let htsc = derive_secret(hs, tls13_client_handshake_traffic_secret, log2) in
++  hkdf_expand_label(htsc, tls13_privasys_binder, hash_ideal(log2)).
+ 
+ (********************************************************)
+ (*  Message Formats, Session State *)

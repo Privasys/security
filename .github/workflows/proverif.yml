@@ -1,0 +1,39 @@
+name: proverif
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  attested-tls-level3:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - A-proposal-g3-excl
+          - B-privasys-binder
+          - C-privasys-binder-g3-excl
+          - D-privasys-binder-compliant-tls
+          - E-proposal-compliant-tls
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Build ProVerif 2.05 from source
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y ocaml
+          curl -fsSL -o proverif2.05.tar.gz https://bblanche.gitlabpages.inria.fr/proverif/proverif2.05.tar.gz
+          tar xzf proverif2.05.tar.gz
+          (cd proverif2.05 && ./build -nointeract)
+          mkdir -p "$HOME/bin" && cp proverif2.05/proverif "$HOME/bin/proverif205"
+          "$HOME/bin/proverif205" -help 2>&1 | head -1 | grep -q 'Proverif 2.05'
+      - name: Run model
+        run: bash ./attested-tls-level3/run.sh "$HOME/bin/proverif205" ${{ matrix.model }}
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.model }}-summary
+          path: attested-tls-level3/work/${{ matrix.model }}/summary.txt

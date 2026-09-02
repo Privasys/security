@@ -1,0 +1,18 @@
+Privasys attested-TLS Level 3 binding: ProVerif models
+
+Copyright 2026 Privasys Ltd.
+
+This work is a derivative of the ProVerif artifacts published with
+"Intra-handshake.fail (CVE-2026-33697): High-severity CVE in Attested TLS"
+by Muhammad Usama Sardar, Viacheslav Dubeyko and Jean-Marie Jacquet,
+https://github.com/muhammad-usama-sardar/intra-handshake.fail
+(commit 8bf40390b38bf59a3560d489266ae846be7fa5ac, folder proposal/),
+licensed under the Apache License, Version 2.0.
+
+The observation that the published relay-attack queries do not carry the
+standard cryptographic assumptions applied elsewhere in the same model was first
+made publicly by Nathanael Ritz on the Confidential Computing Consortium
+Attestation SIG list on 1 July 2026.
+
+Files under models/ carry a "Privasys" marker on every line that differs from
+the upstream artifact. Everything else is the authors' work, unchanged.

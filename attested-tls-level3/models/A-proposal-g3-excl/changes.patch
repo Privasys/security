@@ -1,0 +1,40 @@
+--- upstream/proposal/tls-lib-simple.pvl
++++ A-proposal-g3-excl/tls-lib-simple.pvl
+@@ -632,10 +632,35 @@
+ Rationale: It has transcript hash up to log_SF (vs. log_SH in above property).
+ Result: false
+ *)
+-query ev:bitstring,kc1:ae_key,kc2:ae_key;
++(* Privasys 2026-09-02: G3 under the SAME crypto assumptions the authors apply
++   to every other query (no weak DH group, no bad element, no weak hash).
++   Key LEAKAGE IS STILL ALLOWED: the LEK, LLTK and LAK processes run unchanged
++   and are NOT excluded here, so this is the CVE-2026-33697 adversary
++   (extracted leaf key) against a strong TLS 1.3 suite. *)
++query ev:bitstring,kc1:ae_key,kc2:ae_key,
++      cr:random,sr:random,cr':random,sr':random,e:element;
+       event(ClientStateEvKc(ev,kc1)) &&
+       event(ServerStateEvKc(ev,kc2)) ==>
+-      (kc1 = kc2)
++      (kc1 = kc2) ||
++      event(ServerChoosesKEX(cr,sr,DHE_13(WeakDH,e))) ||
++      event(ServerChoosesHash(cr',sr',WeakHash)) ||
++      event(SentBadElement)
++.
++
++(* Privasys 2026-09-02: G3 as above, additionally excluding every key leak
++   (mirrors the G-C2 query shape exactly). *)
++query ev:bitstring,kc1:ae_key,kc2:ae_key,
++      cr:random,sr:random,cr':random,sr':random,e:element,
++      pubAK:pubkey,pubEK:pubkey,pubLTK:pubkey;
++      event(ClientStateEvKc(ev,kc1)) &&
++      event(ServerStateEvKc(ev,kc2)) ==>
++      (kc1 = kc2) ||
++      event(ServerChoosesKEX(cr,sr,DHE_13(WeakDH,e))) ||
++      event(ServerChoosesHash(cr',sr',WeakHash)) ||
++      event(SentBadElement) ||
++      event(LeakedAK(pubAK)) ||
++      event(LeakedEK(pubEK)) ||
++      event(LeakedLTK(pubLTK))
+ .
+ 
+ (********************************************************)

@@ -1,0 +1,4 @@
+# local scratch: raw clone + full ProVerif logs (20 MB each)
+ra-tls/
+# run artefacts
+attested-tls-level3/work/

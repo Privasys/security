@@ -1,0 +1,3 @@
+[submodule "attested-tls-level3/intra-handshake.fail"]
+	path = attested-tls-level3/intra-handshake.fail
+	url = https://github.com/muhammad-usama-sardar/intra-handshake.fail

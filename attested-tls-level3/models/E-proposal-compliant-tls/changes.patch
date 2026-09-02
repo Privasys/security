@@ -1,0 +1,38 @@
+--- upstream/proposal/tls-lib-simple.pvl
++++ E-proposal-compliant-tls/tls-lib-simple.pvl
+@@ -648,6 +648,8 @@
+ (
+   in(io, ioffer:params);  (* io is a public channel. ioffer is obtained from adversary as input to allow adversary to generate all valid patterns *)
+   let nego(=aTLS,DHE_13(g,eee),hash_algo,ev_type) = ioffer in
++  (* Privasys 2026-09-02, compliant TLS 1.3 client: only strong (EC)DHE groups and SHA-2 suites are offered [RFC 8446 s4.2.7, s9.1] *)
++  if g = StrongDH then if hash_algo = StrongHash then
+   (* Message parsing modeled as a pattern-match with the constructors [Bhargavan2017; p. 17] *)
+ 
+   let (x:bitstring, gx:element) = dh_keygen(g) in
+@@ -669,6 +671,8 @@
+ 
+   in(io, SH(sr,mode)) [precise];  (* Receive ServerHello *)
+   let nego(=aTLS,DHE_13(=g,gy),shash_algo,sev_type) = mode in  (* pattern matching to ensure that received mode is in the desired format and is in the same group g as sent *)
++  (* Privasys: key-share validation, a bad element is rejected [RFC 8446 s4.2.8.1, s7.4] *)
++  if gy <> BadElement then if shash_algo = StrongHash then
+   let log_SH = (ch,SH(sr,mode)) in  (* after this step, log_SH contains sent ClientHello || received ServerHello *)
+ 
+   let gxy = e2b(dh_exp(g,gy,x)) in  (* represents (EC)DHE in Key Derivation [Sec. 7.1, RFC8446] *)
+@@ -746,6 +750,8 @@
+   in(io, ch:msg); (* Receive ClientHello message from Client and store in variable ch *)
+   let CH(cr,offer,ar) = ch in (* pattern matching to ensure that received message in variable ch is in the desired format fun CH(random,params,random):msg [data]. nonce will be stored in variable cr and parameters will be stored in variable offer. Attestation nonce will be stored in ar *)
+   let nego(=aTLS,DHE_13(g,gx),xhash_algo,xev_type) = offer in (* pattern matching to ensure that received message in variable offer is in the desired format fun nego(tls_typ,kex_alg,hash_alg,ev_typ): params [data]. *)
++  (* Privasys 2026-09-02, compliant TLS 1.3 server: strong group, key-share validation [RFC 8446 s4.2.8.1, s7.4] *)
++  if g = StrongDH then if gx <> BadElement then
+   let psk = NoPSK in (* non-PSK handshake, so use NoPSK to get zero. *)
+   let (es:bitstring,kb:mac_key,kc0:ae_key,exp0:bitstring) = kdf_es(psk,msg2bytes(ch)) in  (* non-PSK handshake, so use NoPSK to get zero. log1 is simply ch *)
+ 
+@@ -753,6 +759,8 @@
+ (* instead of SH as input in original *)
+   in(io, smode:params);  (* io is a public channel. It is obtained from adversary as input to allow adversary to generate all valid modes *)
+   let nego(=aTLS,DHE_13(=g,eee),hash_algo,ev_type) = smode in (* check format of smode and ensure that group matches the group g as in ClientHello message *)
++  (* Privasys: a compliant server negotiates only SHA-2 suites *)
++  if hash_algo = StrongHash then
+ 
+   let (y:bitstring,gy:element) = dh_keygen(g) in
+   (* (y,gy) returned by dh_keygen for a given group g and freshly generated y; see def. above in the same file *)
