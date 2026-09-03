@@ -1,0 +1,361 @@
+--- upstream/proposal/tls-lib-simple.pvl
++++ H-post-handshake-exporter-compliant-tls/tls-lib-simple.pvl
+@@ -193,6 +193,7 @@
+ 
+   tls13_h_exp_master, (* represents label "h exp master" for cryptographic binding *)
+   tls13_ra_binder, (* represents label "ra binder" for cryptographic binding *)
++  tls13_privasys_attest, (* Privasys v2: exporter label for post-handshake attestation (RFC 8446 s7.5 exporter, RFC 9261 shape) *)
+   user_defined,  (* user-defined for exporter *)
+ 
+   tls13_exporter: label.  (* represents label "exporter" *)
+@@ -251,11 +252,18 @@
+ letfun kdf_psk(ms:bitstring, log4:bitstring) =  (* 1st parameter represents Master Secret; 2nd parameter represents messages ClientHello...client Finished for derive_secret *)
+        derive_secret(ms,tls13_resumption_master_secret,log4).  (* represents resumption_master_secret in the Key Schedule [Sec. 7.1, RFC8446] *)
+ 
+-(* Proposed exporter for cryptographic binding *)
+-letfun kdf_exp(hs:bitstring, log2:bitstring) =  (* 1st parameter represents Handshake Secret as salt; 2nd parameter represents messages ClientHello...ServerHello for derive_secret *)
+-  let hes = derive_secret(hs, tls13_h_exp_master, log2) in
+-  let ik1 = derive_secret(hes, tls13_ra_binder, zero) in
+-  hkdf_expand_label(ik1, tls13_exporter, hash_ideal(context_value2)).
++(* Privasys RA-TLS v2 (2026-09-03), post-handshake binder. The certificate carries no evidence;
++   after the handshake the client sends a fresh context and the server answers with a quote whose
++   report_data commits to the leaf key, the context, and a TLS exporter value:
++     hctx = TLS-Exporter("EXPORTER-privasys-attest", context, 32)              [RFC 8446 s7.5, RFC 9261 shape]
++          = HKDF-Expand-Label(Derive-Secret(exporter_master_secret, label, ""), "exporter", Hash(context))
++     exporter_master_secret = Derive-Secret(Master Secret, "exp master", ClientHello..server Finished)
++   rdata = (context, hctx, pubEK) below is the symbolic form of SHA-512(SHA-256(SPKI) || context || hctx).
++   Only the binder and the message order change against the researchers' proposal; the threat model,
++   the cryptographic primitives and the queries are theirs, unchanged. *)
++letfun kdf_exp_post(ems:bitstring, context:bitstring) =
++  let ik = derive_secret(ems, tls13_privasys_attest, zero) in
++  hkdf_expand_label(ik, tls13_exporter, hash(StrongHash, context)).
+ 
+ (********************************************************)
+ (*  Message Formats, Session State *)
+@@ -278,14 +286,17 @@
+ type params.
+ fun nego(tls_typ,kex_alg,hash_alg,ev_typ): params [data].
+ 
+-fun CH(random,params,random):msg [data].  (* ClientHello *)
++fun CH(random,params):msg [data].  (* ClientHello; Privasys v2: no attestation nonce in the handshake *)
+ fun SH(random,params):msg [data].  (* ServerHello *)
+ (* EncryptedExtensions msg not modelled *)
+-(*  CRT(pubEK ,quote    ,selfsign ,ID_S    ,server_cert ) *)
+-fun CRT(pubkey,bitstring,bitstring,identity,bitstring   ):msg [data].  (* Certificate message of TLS *)
++(*  CRT(pubEK ,ID_S    ,server_cert ) *)
++fun CRT(pubkey,identity,bitstring):msg [data].  (* Certificate message of TLS; Privasys v2: leaf key and chain only, no evidence *)
+ fun CV(bitstring):msg [data].  (* CertificateVerify *)
+ fun CV_Ext(bitstring,bitstring):msg [data].  (* Extended CertificateVerify *)
+ fun FIN(bitstring):msg [data].  (* Finished *)
++(* Privasys v2: post-handshake attestation exchange, carried as application data *)
++fun AREQ(random):msg [data].     (* attestation request: fresh context (nonce) chosen after the handshake *)
++fun ARES(bitstring):msg [data].  (* attestation response: the quote *)
+ 
+ (********************************************************)
+ (*  Events for Properties *)
+@@ -638,72 +649,72 @@
+       (kc1 = kc2)
+ .
+ 
++(* Privasys, interpretation of the relay queries. Reachability: both endpoints accept
++   the same evidence with the same application key, and the attacker holds that key.
++   "false" means such a trace exists; the relay goals G1 to G3 are correlation goals and
++   do not say who holds the key. *)
++query ev:bitstring,kc:ae_key;
++      event(ClientStateEvKc(ev,kc)) &&
++      event(ServerStateEvKc(ev,kc)) &&
++      attacker(kc)
++.
++
+ (********************************************************)
+ (* Client *)
+ (********************************************************)
+-(* (for usability/extensibility), we can use variables for messages, 
+-e.g., SH so that these variables can then be used in logs *)
++(* Privasys v2: the handshake is plain TLS 1.3 with server authentication by the leaf key
++   (pubEK) and the long-term key (pubLTK). Attestation happens after the handshake: the
++   client sends a fresh context, receives the quote, and checks its report_data against the
++   exporter of this connection. The exchange is modelled on the public channel, as every
++   handshake message is in this model; encryption under the application keys would only
++   restrict the adversary. *)
+ 
+ let Client(ID_C:identity,ID_S:identity,pubAK:pubkey,pubCA:pubkey) =
+ (
+   in(io, ioffer:params);  (* io is a public channel. ioffer is obtained from adversary as input to allow adversary to generate all valid patterns *)
+   let nego(=aTLS,DHE_13(g,eee),hash_algo,ev_type) = ioffer in
++  (* Privasys 2026-09-02, compliant TLS 1.3 client: only strong (EC)DHE groups and SHA-2 suites are offered [RFC 8446 s4.2.7, s9.1] *)
++  if g = StrongDH then if hash_algo = StrongHash then
+   (* Message parsing modeled as a pattern-match with the constructors [Bhargavan2017; p. 17] *)
+ 
+   let (x:bitstring, gx:element) = dh_keygen(g) in
+-  (* (x,gx) returned by dh_keygen for a given group g and freshly generated x; see def. above in the same file *)
+   let offer = nego(aTLS,DHE_13(g,gx),hash_algo,ev_type) in
+-  (* Note that we really need DHE_13(g,gx) *)
+ 
+   new cr:random;  (* random nonce: ClientHello.random; 8446bis page 10 *)
+-  new ar:random;  (* random nonce for attestation *)
+-  let ch = CH(cr,offer,ar) in
++  let ch = CH(cr,offer) in
+   let psk = NoPSK in (* non-PSK handshake, so use NoPSK to get zero. *)
+-  let (es:bitstring,kb:mac_key,kc0:ae_key,exp0:bitstring) = kdf_es(psk,msg2bytes(ch)) in  (* non-PSK handshake, so use NoPSK to get zero. log1 is simply ch *)
+-  (* If a given secret is not available, then the 0-value consisting of a string of Hash.length bytes set to zeros is used.
+-  Note that this does not mean skipping rounds, so if PSK is not in use, Early Secret will still be HKDF-Extract(0, 0). [Section 7.1, RFC8446]  *)
+-  event ClientOffersHash(cr,hash_algo); (*hash algorithm used for HKDF [Table 4 in Appendix B.4 8446bis]*)
+-  event ClientOffersKEX(cr,DHE_13(g,gx));  (* supported_groups: which (EC)DHE groups client supports; and key_share extensions: (EC)DHE shares for some or all of these groups: [sec. 4.1.1. in 8446]; DH Key exchange groups [Schwenk2022 p.253] *)
++  let (es:bitstring,kb:mac_key,kc0:ae_key,exp0:bitstring) = kdf_es(psk,msg2bytes(ch)) in
++  event ClientOffersHash(cr,hash_algo);
++  event ClientOffersKEX(cr,DHE_13(g,gx));
+   event ClientOffersEvType(cr,ev_type);
+   out(io, ch);  (* send ClientHello message *)
+ 
+   in(io, SH(sr,mode)) [precise];  (* Receive ServerHello *)
+   let nego(=aTLS,DHE_13(=g,gy),shash_algo,sev_type) = mode in  (* pattern matching to ensure that received mode is in the desired format and is in the same group g as sent *)
++  (* Privasys: key-share validation, a bad element is rejected [RFC 8446 s4.2.8.1, s7.4] *)
++  if gy <> BadElement then if shash_algo = StrongHash then
+   let log_SH = (ch,SH(sr,mode)) in  (* after this step, log_SH contains sent ClientHello || received ServerHello *)
+ 
+   let gxy = e2b(dh_exp(g,gy,x)) in  (* represents (EC)DHE in Key Derivation [Sec. 7.1, RFC8446] *)
+   let (hs:bitstring,kch:ae_key,ksh:ae_key,kcm:mac_key,ksm:mac_key) = kdf_hs(es,gxy,log_SH) in
+-  in(io,CRT(pubEK,quote,selfsign,=ID_S,server_cert));  (* receive Certificate message (Note: =ID_S can be removed) *)
++  in(io,CRT(pubEK,=ID_S,server_cert));  (* receive Certificate message: leaf key, identity, chain; no evidence *)
+   let (id_pub_pair:bitstring, sig1:bitstring) = server_cert in  (* check server_cert format *)
+-	let (=ID_S,pubLTK:pubkey) = id_pub_pair in  (* check signed data format *)
++  let (=ID_S,pubLTK:pubkey) = id_pub_pair in  (* check signed data format *)
+   if verify(pubCA,id_pub_pair,sig1) = true then  (* check signatures on server_cert *)
+-
+-  let (dataSign:bitstring, sig:bitstring) = quote in  (* check quote format *)
+-	let (rdata:bitstring,dev_status1:bitstring) = dataSign in  (* check dataSign format *)
+-  if verify(pubAK,dataSign,sig) = true then  (* check signatures on Quote *)
+-  if dev_status1 = dev_statusRef then  (*check measurements against Ref. Values *)
+-  let cb = kdf_exp(hs,log_SH) in
+-  if rdata = (ar,cb,pubEK) then (* rdata = ar || cb || pubEK *)
+-  (* event Appraised(log_SH); *)
+-  (* event AcceptedRdata(dev_status1); *)
+-  let log_CRT = (log_SH,CRT(pubEK,quote,selfsign,ID_S,server_cert)) in  (* after this step, log_CRT contains sent ClientHello || received ServerHello || received Certificate *)
++  let log_CRT = (log_SH,CRT(pubEK,ID_S,server_cert)) in
+ 
+   in(io,CV_Ext(s,s_LTK));  (* receive CertificateVerify message *)
+-  if verify(pubEK,hash(shash_algo,log_CRT),s) = true then  (* log_CRT contains msgs up to Certificate *)
+-  if verify(pubLTK,hash(shash_algo,log_CRT),s_LTK) = true then  (* log_CRT contains msgs up to Certificate *)
+-  event Accepted(quote);
+-  event Appraised(log_SH);
+-  event AcceptedRdata(dev_status1);
+-  event AcceptedWithPubEK(quote,pubEK);
+-  let log_CV = (log_CRT,CV_Ext(s,s_LTK)) in  (* after this step, log_CV contains sent ClientHello || received ServerHello || received Certificate || received CertificateVerify *)
++  if verify(pubEK,hash(shash_algo,log_CRT),s) = true then
++  if verify(pubLTK,hash(shash_algo,log_CRT),s_LTK) = true then
++  let log_CV = (log_CRT,CV_Ext(s,s_LTK)) in
+ 
+   in(io,FIN(m1));  (* receive server Finished message containing hmac of log *)
+-  if m1 = hmac(StrongHash,ksm,log_CV) then    (* hmac(hash_alg,mac_key,bitstring); mac_key = ksm using Client's perspective of log_CV; that's why client needs to generate server keys also *)
++  if m1 = hmac(StrongHash,ksm,log_CV) then
+   (
+-    let log_SFIN = (log_CV,FIN(m1)) in  (* after this step, log_SFIN contains sent ClientHello || received ServerHello || received Certificate || received CertificateVerify || received server Finished *)
++    let log_SFIN = (log_CV,FIN(m1)) in
+     let (ms:bitstring,kc:ae_key,ks:ae_key,ems:bitstring) = kdf_ms(hs,log_SFIN) in
+-    let m2 = hmac(StrongHash,kcm,log_SFIN) in  (* hmac(hash_alg,mac_key,bitstring); mac_key = kcm *)
+-    let log_CFIN = (log_SFIN,FIN(m2)) in  (* after this step, log_CFIN contains sent ClientHello || received ServerHello || received Certificate || received CertificateVerify || received server Finished || sent client Finished *)
++    let m2 = hmac(StrongHash,kcm,log_SFIN) in
++    let log_CFIN = (log_SFIN,FIN(m2)) in
+     let rms =  kdf_psk(ms,log_CFIN) in
+     event ClientFinishedAliveness(ID_S);
+     event ClientFinishedWeakAgr(ID_S,ID_C);
+@@ -713,27 +724,36 @@
+     event ClientFinRecentAgr(ID_S,ID_C,pubLTK,psk,offer,mode,kc,ks,ems,rms,cr,sr);
+     event ClientFinishedWithID(ID_S,pubLTK,pubAK,psk,cr,sr,offer,mode,kc,ks,ems,rms);
+     event ClientFinishedWithBothPub(pubAK,psk,pubEK,cr,sr,offer,mode,kc,ks,ems,rms);
+-    event ClientConn(quote);
+-    event ClientComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,rms,cr,sr,pubEK,dev_status1);
+-    event ClientRA(pubAK,pubEK,dev_status1,quote);
+-    event ClientRA2(pubAK,pubEK,dev_status1);
+-    event ClientRA3(pubAK,pubEK,dev_status1,ID_C);
+-    event ClientRAWithoutAK(pubEK,dev_status1,quote);    
+-    event ClientRANew(NULL_ID,NULL_pubkey,pubAK,pubEK,dev_status1,quote);
+     event ClientID(ID_S,gxy);
+-    event ClientStateEvKc(quote,kc);    
+-    event ClientStateEvKch(quote,kch);
+-    event ClientStateEv(quote,gxy);
+     event ClientFinished(pubEK,psk,cr,sr,offer,mode,kc,ks,ems,rms);
+-    (* insert clientSession(cr,sr,psk,offer,mode,kc,ks,ems,rms);  kc and ks are passed to appData via this table *)
+-    out(io,FIN(m2))  (* send ClientFinished message *)
++    out(io,FIN(m2));  (* send ClientFinished message; the handshake is complete *)
+ 
+-
+-(* to test secrecy *)
+-    (* let key = b2s(gxy) in
+-    let enc_msg = sym_enc(key,mesg) in
+-    out (io, enc_msg);
+-    0 *)
++    (* Post-handshake attestation, repeated at will on a long-lived connection *)
++    !(
++      new ar:random;  (* fresh context for this attestation request *)
++      out(io, AREQ(ar));
++      in(io, ARES(quote));
++      let (dataSign:bitstring, sig:bitstring) = quote in  (* check quote format *)
++      let (rdata:bitstring,dev_status1:bitstring) = dataSign in  (* check dataSign format *)
++      if verify(pubAK,dataSign,sig) = true then  (* check signatures on Quote *)
++      if dev_status1 = dev_statusRef then  (*check measurements against Ref. Values *)
++      let cb = kdf_exp_post(ems,rand2bs(ar)) in  (* the client computes the exporter of its own connection for its own context *)
++      if rdata = (ar,cb,pubEK) then  (* rdata = context || hctx || pubEK, predicted by the verifier, never accepted from the peer *)
++      event Accepted(quote);
++      event Appraised(log_SH);
++      event AcceptedRdata(dev_status1);
++      event AcceptedWithPubEK(quote,pubEK);
++      event ClientConn(quote);
++      event ClientComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,rms,cr,sr,pubEK,dev_status1);
++      event ClientRA(pubAK,pubEK,dev_status1,quote);
++      event ClientRA2(pubAK,pubEK,dev_status1);
++      event ClientRA3(pubAK,pubEK,dev_status1,ID_C);
++      event ClientRAWithoutAK(pubEK,dev_status1,quote);
++      event ClientRANew(NULL_ID,NULL_pubkey,pubAK,pubEK,dev_status1,quote);
++      event ClientStateEvKc(quote,kc);
++      event ClientStateEvKch(quote,kch);
++      event ClientStateEv(quote,gxy)
++    )
+   )
+ ).
+ 
+@@ -743,28 +763,34 @@
+ 
+ let Server(ID_S:identity, privLTK: privkey, privAK: privkey, privEK: privkey,ID_C:identity,server_cert:bitstring) =
+ (
++  (* model of dev_status (measurements): input from adversary, as in the original model.
++     Read once per server session: the VM state exists before any connection. *)
++  in(io, dev_status1: bitstring);
++
+   in(io, ch:msg); (* Receive ClientHello message from Client and store in variable ch *)
+-  let CH(cr,offer,ar) = ch in (* pattern matching to ensure that received message in variable ch is in the desired format fun CH(random,params,random):msg [data]. nonce will be stored in variable cr and parameters will be stored in variable offer. Attestation nonce will be stored in ar *)
+-  let nego(=aTLS,DHE_13(g,gx),xhash_algo,xev_type) = offer in (* pattern matching to ensure that received message in variable offer is in the desired format fun nego(tls_typ,kex_alg,hash_alg,ev_typ): params [data]. *)
++  let CH(cr,offer) = ch in
++  let nego(=aTLS,DHE_13(g,gx),xhash_algo,xev_type) = offer in
++  (* Privasys 2026-09-02, compliant TLS 1.3 server: strong group, key-share validation [RFC 8446 s4.2.8.1, s7.4] *)
++  if g = StrongDH then if gx <> BadElement then
+   let psk = NoPSK in (* non-PSK handshake, so use NoPSK to get zero. *)
+-  let (es:bitstring,kb:mac_key,kc0:ae_key,exp0:bitstring) = kdf_es(psk,msg2bytes(ch)) in  (* non-PSK handshake, so use NoPSK to get zero. log1 is simply ch *)
++  let (es:bitstring,kb:mac_key,kc0:ae_key,exp0:bitstring) = kdf_es(psk,msg2bytes(ch)) in
+ 
+   new sr:random; (* Server nonce used in "SH" below *)
+-(* instead of SH as input in original *)
+   in(io, smode:params);  (* io is a public channel. It is obtained from adversary as input to allow adversary to generate all valid modes *)
+   let nego(=aTLS,DHE_13(=g,eee),hash_algo,ev_type) = smode in (* check format of smode and ensure that group matches the group g as in ClientHello message *)
++  (* Privasys: a compliant server negotiates only SHA-2 suites *)
++  if hash_algo = StrongHash then
+ 
+   let (y:bitstring,gy:element) = dh_keygen(g) in
+-  (* (y,gy) returned by dh_keygen for a given group g and freshly generated y; see def. above in the same file *)
+-  let mode = nego(aTLS,DHE_13(g,gy),hash_algo,ev_type) in  (* Server selects a mode that fixes the group and all other session parameters [Bhargavan2017; p.16] *)
++  let mode = nego(aTLS,DHE_13(g,gy),hash_algo,ev_type) in
+   out(io,SH(sr,mode));  (* Send ServerHello containing server nonce and selected mode *)
+-  let log_SH = (ch,SH(sr,mode)) in  (* received ClientHello || sent ServerHello *)
+-  event ServerChoosesKEX(cr,sr,DHE_13(g,gy));  (* DHKE group *)
+-  event ServerChoosesHash(cr,sr,hash_algo);  (* hash algorithm used for HKDF/transcript hash [Table 4 in Appendix B.4 8446bis] *)
+-  event ServerChoosesATLS(cr,sr,aTLS); (* Standard or Attested TLS *)
+-  event ServerChoosesEvType(cr,sr,ev_type);  (* Evidence type *)
++  let log_SH = (ch,SH(sr,mode)) in
++  event ServerChoosesKEX(cr,sr,DHE_13(g,gy));
++  event ServerChoosesHash(cr,sr,hash_algo);
++  event ServerChoosesATLS(cr,sr,aTLS);
++  event ServerChoosesEvType(cr,sr,ev_type);
+ 
+-  let gxy = e2b(dh_exp(g,gx,y)) in  (* represents (EC)DHE in Key Derivation [Sec. 7.1, RFC8446] *)
++  let gxy = e2b(dh_exp(g,gx,y)) in
+   let (hs:bitstring,kch:ae_key,ksh:ae_key,kcm:mac_key,ksm:mac_key) = kdf_hs(es,gxy,log_SH) in
+ 
+   let pubEK = pk(privEK) in
+@@ -772,60 +798,57 @@
+   let pubAK = pk(privAK) in
+   event ServerID(ID_S,gxy);
+ 
+-  (* Evidence generation *)
+-  let cb = kdf_exp(hs,log_SH) in
+-  let rdata = (ar,cb,pubEK) in (* Proposed binder = ar || cb || pubEK *)
+-  (* model of dev_status (measurements): input from adversary *)
+-  (* Lets the adversary instantiate any desired VM 
+-      but only the one with correct measurements will be accepted at Verifier *)
+-  (* Alternative model: generate using new, give to adversary and use tables to store *)
+-	in(io, dev_status1: bitstring);
+-  let dataSign = (rdata,dev_status1) in
+-  let quote = (dataSign, sign(privAK,dataSign)) in
+-  let selfsign = sign(privEK,(pubEK,quote)) in
+-
+-  event Conveyed(log_SH);
+-  event Sent(quote);
+-  event SentWithPubEK(quote,pubEK);
+-  event SentRdata(dev_status1);
+-  event ServerRA(ID_S,pubLTK,pubAK,pubEK,dev_status1,quote);  
+-  event ServerRA2(pubAK,pubEK,dev_status1);
+-  event ServerRAWithoutAK(pubEK,dev_status1,quote);
+-  out(io,CRT(pubEK,quote,selfsign,ID_S,server_cert));  (* Send Certificate message *)
+-  let log_CRT = (log_SH,CRT(pubEK,quote,selfsign,ID_S,server_cert)) in  (* received ClientHello || sent ServerHello || sent Certificate *)
++  out(io,CRT(pubEK,ID_S,server_cert));  (* Send Certificate message: leaf key, identity, chain; no evidence *)
++  let log_CRT = (log_SH,CRT(pubEK,ID_S,server_cert)) in
+ 
+   (* CertificateVerify message *)
+-  let sg     = sign(privEK ,hash(hash_algo,log_CRT)) in  (* A signature over the value Transcript-Hash(Handshake Context, Certificate) [Sec. 4.4, RFC8446] using LTK; Handshake Context via first row of table in Sec. 4.4 of RFC8446. log_CRT contains Handshake Context, Certificate. *)
+-  let sg_LTK = sign(privLTK,hash(hash_algo,log_CRT)) in  (* A signature over the value Transcript-Hash(Handshake Context, Certificate) [Sec. 4.4, RFC8446] using LTK; Handshake Context via first row of table in Sec. 4.4 of RFC8446. log_CRT contains Handshake Context, Certificate. *)
++  let sg     = sign(privEK ,hash(hash_algo,log_CRT)) in
++  let sg_LTK = sign(privLTK,hash(hash_algo,log_CRT)) in
+   out(io,CV_Ext(sg,sg_LTK));  (* Send CertificateVerify message *)
+-  let log_CV = (log_CRT,CV_Ext(sg,sg_LTK)) in  (* received ClientHello || sent ServerHello || sent Certificate || sent CertificateVerify *)
++  let log_CV = (log_CRT,CV_Ext(sg,sg_LTK)) in
+ 
+   (* serverFinished message *)
+-  let m1 = hmac(StrongHash,ksm,log_CV) in  (* A MAC over the value Transcript-Hash(Handshake Context, Certificate, CertificateVerify) using a MAC key derived from the Base Key [Sec. 4.4, RFC8446]. Handshake Context via first row of table in Sec. 4.4 of RFC8446. log_CV contains Handshake Context, Certificate, CertificateVerify  *)
+-  let log_SFIN = (log_CV,FIN(m1)) in  (* received ClientHello || sent ServerHello || sent Certificate || sent CertificateVerify || sent ServerFinished *)
++  let m1 = hmac(StrongHash,ksm,log_CV) in
++  let log_SFIN = (log_CV,FIN(m1)) in
+   let (ms:bitstring,kc:ae_key,ks:ae_key,ems:bitstring) = kdf_ms(hs,log_SFIN) in  (* Key Derivation [Sec. 7.1, RFC8446] *)
+   event PreServerFinished(pubEK,psk,cr,sr,offer,mode,kc,ks,ems);
+   event PreServerFinishedAliveness(ID_S);
+   event PreServerFinishedWeakAgr(ID_S,ID_C);
+   event PreServerFin1WayAgr(ID_S,pubLTK,psk,offer,mode,kc,ks,ems);
+-  event PreServerFinRecent1WayAgr(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr);  
++  event PreServerFinRecent1WayAgr(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr);
+   event PreServerFinAgr(ID_S,ID_C,pubLTK,psk,offer,mode,kc,ks,ems);
+   event PreServerFinRecentAgr(ID_S,ID_C,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr);
+   event PreServerFinishedWithID(ID_S,pubLTK,pubAK,psk,cr,sr,offer,mode,kc,ks,ems);
+   event PreServerFinishedWithBothPub(pubAK,psk,pubEK,cr,sr,offer,mode,kc,ks,ems);
+-  event PreServerComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr,pubEK,dev_status1);  
++  event PreServerComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr,pubEK,dev_status1);
+   out(io,FIN(m1));  (* Send serverFinished message *)
+ 
+   (* clientFinished message *)
+-  in(io,FIN(m2));  (* Receive client Finished message *)
+-  if m2 = hmac(StrongHash,kcm,log_SFIN) then  (* kcm represents kcm; check mac of finished from client *)
+-    let log_CFIN = (log_SFIN,FIN(m2)) in  (* received ClientHello || sent ServerHello || sent Certificate || sent CertificateVerify || sent ServerFinished || received ClientFinished *)
+-	let rms =  kdf_psk(ms,log_CFIN) in
+-  event ServerStateEvKc(quote,kc);
+-  event ServerStateEvKch(quote,kch);
+-  event ServerStateEv(quote,gxy);
++  in(io,FIN(m2));
++  if m2 = hmac(StrongHash,kcm,log_SFIN) then
++  let log_CFIN = (log_SFIN,FIN(m2)) in
++  let rms =  kdf_psk(ms,log_CFIN) in
+   event ServerFinished(cr,sr,psk,pubLTK,offer,mode,kc,ks,ems,rms);
+-  event ServerComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr,pubEK,dev_status1)
+-  (* insert serverSession(cr,sr,psk,offer,mode,kc,ks,ems,rms);  kc and ks are passed to appData via this table *)
++  event ServerComp(ID_S,pubLTK,psk,offer,mode,kc,ks,ems,cr,sr,pubEK,dev_status1);
+ 
+-).
+\ No newline at end of file
++  (* Post-handshake attestation responder: any number of quotes on this connection,
++     each bound to the exporter of this connection and to the context of the request *)
++  !(
++    in(io, AREQ(ar));
++    let cb = kdf_exp_post(ems,rand2bs(ar)) in
++    let rdata = (ar,cb,pubEK) in  (* rdata = context || hctx || pubEK *)
++    let dataSign = (rdata,dev_status1) in
++    let quote = (dataSign, sign(privAK,dataSign)) in
++    event Conveyed(log_SH);
++    event Sent(quote);
++    event SentWithPubEK(quote,pubEK);
++    event SentRdata(dev_status1);
++    event ServerRA(ID_S,pubLTK,pubAK,pubEK,dev_status1,quote);
++    event ServerRA2(pubAK,pubEK,dev_status1);
++    event ServerRAWithoutAK(pubEK,dev_status1,quote);
++    event ServerStateEvKc(quote,kc);
++    event ServerStateEvKch(quote,kch);
++    event ServerStateEv(quote,gxy);
++    out(io,ARES(quote))
++  )
++).

@@ -16,6 +16,8 @@ jobs:
           - C-privasys-binder-g3-excl
           - D-privasys-binder-compliant-tls
           - E-proposal-compliant-tls
+          - G-post-handshake-exporter
+          - H-post-handshake-exporter-compliant-tls
     steps:
       - uses: actions/checkout@v4
         with:

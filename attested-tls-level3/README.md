@@ -32,10 +32,12 @@ trace in the log.
 | `C-privasys-binder-g3-excl` | Privasys | as A | true | true | **true** |
 | `E-proposal-compliant-tls` | authors' | compliant TLS 1.3 endpoints, **G3 query unchanged**, key leaks allowed | true | true | **true** |
 | `D-privasys-binder-compliant-tls` | Privasys | as E | true | true | **true** |
+| `G-post-handshake-exporter` | post-handshake, exporter | as upstream, **all queries unchanged** | true | true | **true** |
+| `H-post-handshake-exporter-compliant-tls` | post-handshake, exporter | as E | true | true | **true** |
 
 In every model the reachability sanity queries stay false, so a run in which both
-endpoints accept the same evidence exists and the proofs are not vacuous. Runtimes: 2 to
-9 minutes per model on one core.
+endpoints accept the same evidence exists and the proofs are not vacuous. Runtimes: 30
+seconds to 9 minutes per model on one core.
 
 ## What the published G3 trace needs
 
@@ -77,6 +79,54 @@ Each `models/<name>/changes.patch` is a unified diff against the authors'
   `StrongHash`, the server accepts only those, and both sides reject `BadElement` as a
   key share. The `SendBadElement`, `LEK`, `LAK` and `LLTK` processes still run, and all
   queries, including G3, are the authors' verbatim.
+- **Post-handshake, exporter binder** (G, H). The certificate carries the leaf key and
+  the chain and no evidence (`CRT(pubEK, ID_S, server_cert)`, `CH(cr, offer)` without an
+  attestation nonce). After client Finished the client sends a fresh context, the server
+  answers with a quote, any number of times on one connection, and the client accepts it
+  only if `rdata = (context, hctx, pubEK)` with `hctx` its own
+  `HKDF-Expand-Label(Derive-Secret(exporter_master_secret, label, ""), "exporter", Hash(context))`
+  (RFC 8446 section 7.5, the shape of RFC 9261). G adds one reachability query, described
+  below; the authors' queries are untouched. H adds the four guards of D.
+
+## Post-handshake attestation in the same model
+
+The authors recommend post-handshake attestation with an exporter-derived binder as the
+way to Level 3. Models G and H put that design under the same queries, in the same two
+worlds, so that both designs are compared on one metric.
+
+| Model | TLS in the model | G3 | Both endpoints share the application key and the attacker holds it |
+|---|---|---|---|
+| `B-privasys-binder` (intra-handshake) | weak DH, bad element, weak hash, all leaks | false | **reachable** |
+| `D-privasys-binder-compliant-tls` (intra-handshake) | compliant TLS 1.3, all leaks | true | unreachable |
+| `G-post-handshake-exporter` | weak DH, bad element, weak hash, all leaks | true | **reachable** |
+| `H-post-handshake-exporter-compliant-tls` | compliant TLS 1.3, all leaks | true | unreachable |
+
+The last column is the one query added in G and H:
+
+    query ev:bitstring,kc:ae_key;
+      event(ClientStateEvKc(ev,kc)) && event(ServerStateEvKc(ev,kc)) && attacker(kc).
+
+Two things follow.
+
+- The exporter binder reaches Level 3 with no assumption about the TLS stack. The
+  exporter and the application key are siblings, both derived from the Master Secret and
+  the transcript through server Finished, so equal exporters force equal application
+  keys in any symbolic model. Intra-handshake binders fail G3 only because the
+  application key also depends on Certificate, CertificateVerify and Finished, which do
+  not exist when the quote is minted. A transcript collision cannot separate the two
+  designs: a collision that equalised two exporters would equalise the two application
+  keys by the same collision, and in this model the negotiated hash enters only
+  CertificateVerify in any case.
+- In the world where G3 fails for intra-handshake binders, G3 holds for the
+  post-handshake binder while the attacker holds the application key: the trace
+  negotiates `WeakDH` with `BadElement`, the attacker computes every secret and relays
+  the handshake verbatim, and the quote binds correctly to a key three parties hold. G1
+  to G3 are correlation goals. They say that the two endpoints derived the same key, not
+  that nobody else has it. With compliant TLS 1.3 endpoints neither design leaves that
+  trace, and both hold Level 3.
+
+The B and D results in the last column come from local re-runs of those two models with
+the same query appended; the published B and D patches are unchanged.
 
 ## Reproduce
 
@@ -119,11 +169,15 @@ and, in Cocos AI's post-handshake implementation,
 
 A symbolic result in the authors' own model, with their abstractions: perfect
 cryptography apart from the modelled weaknesses, a single self-signed leaf plus a
-CA-signed certificate, no PSK resumption, no 0-RTT, no post-handshake messages.
-"Compliant TLS 1.3" is four guards on the group, the key share and the hash. The result
-concerns the two bound designs, the authors' proposal and ours; the paper's relay traces
-on the seven unbound mechanisms exist in the model, under its premise that the enclave's
-private key has already been extracted.
+CA-signed certificate, no PSK resumption, no 0-RTT, and, apart from the attestation
+exchange of G and H, no post-handshake messages. G and H omit the CertificateVerify and
+Finished of an RFC 9261 authenticator, which add checks on the client side and cannot
+weaken the binding; their attestation exchange runs on the public channel like every
+handshake message in this model. "Compliant TLS 1.3" is four guards on the group, the
+key share and the hash. The result concerns the three bound designs, the authors'
+proposal, the Privasys intra-handshake binder and the post-handshake exporter binder;
+the paper's relay traces on the seven unbound mechanisms exist in the model, under its
+premise that the enclave's private key has already been extracted.
 
 ## Licence and credit
 
