@@ -8,6 +8,7 @@ inputs, expected outputs and a CI job that regenerates them.
 | Folder | Subject | Status |
 |---|---|---|
 | [`attested-tls-level3/`](attested-tls-level3/) | Level 3 binding of attestation evidence to the TLS connection for intra-handshake RA-TLS (CVE-2026-33697), re-run in the researchers' own ProVerif model with the Privasys binder | proven under compliant TLS 1.3, CI-verified |
+| [`session-relay/`](session-relay/) | The Privasys session relay: enclave bootstrap, WebAuthn challenge binding and the sealed session key, modelled in ProVerif with the relay, the gateway and dishonest enclaves as the attacker | secrecy and agreement proven under two stated assumptions, CI-verified |
 
 After cloning:
 

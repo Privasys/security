@@ -1,0 +1,181 @@
+(* Privasys session relay: bootstrap, WebAuthn challenge binding and session key.
+   Model A: the protocol as shipped (wallet, SDK, IdP, enclave).
+
+   Run:  proverif205 model.pv
+
+   Parties
+     SDK      browser iframe; ephemeral P-256 key, pins the expected attestation digest
+     Wallet   holds the hardware credential of a user; verifies RA-TLS to the enclave
+     Enclave  long-lived identity key enc_pub per app host, TEE-attested TLS leaf
+     IdP      WebAuthn relying party; recomputes the binding challenge, signs the JWT
+     Attacker the network: relay, gateway, and any dishonest enclave with its own measurement
+
+   Abstractions
+     RA-TLS   the TEE signs (measurement digest, leaf public key) and the bootstrap
+              response is authenticated by the leaf key. This takes the Level 3 result
+              of attested-tls-level3 as given: the wallet talks to the enclave whose
+              digest the attestation names.
+     WebAuthn the assertion is a signature by the hardware key over (rpId, challenge).
+     JWT      a signature by the IdP key over the claims the SDK reads.
+
+   Assumptions (see README): enclave-bound secrets are secure, and the Privasys identity
+   provider is not adversarial. After the sessions (phase 1) the IdP signing key and every
+   hardware credential leak to the attacker.
+*)
+
+set ignoreTypes = false.
+
+free c: channel.
+
+type skey.      (* signing private keys: TEE, leaf, hardware credential, IdP *)
+type pkey.
+type exponent.  (* ECDH private scalars *)
+type G.         (* ECDH public points *)
+type key.       (* AEAD keys *)
+type digest.    (* attestation digest, crypto contract section 4.1 *)
+
+(* Signatures *)
+fun pk(skey): pkey.
+fun sign(skey, bitstring): bitstring.
+reduc forall k: skey, m: bitstring; checksign(sign(k, m), pk(k)) = m.
+
+(* ECDH on P-256 *)
+const g: G.
+fun exp(G, exponent): G.
+equation forall x: exponent, y: exponent; exp(exp(g, x), y) = exp(exp(g, y), x).
+
+(* HKDF-SHA256(ikm = shared X coordinate, salt = session_id, info) *)
+fun hkdf(G, bitstring, bitstring): key.
+
+(* SHA-256 *)
+fun h(bitstring): bitstring.
+fun hG(G): bitstring.          (* SHA-256 of a SEC1 point, the sdk_pub_bind claim *)
+
+(* AES-256-GCM with associated data *)
+fun senc(key, bitstring, bitstring): bitstring.
+reduc forall k: key, ad: bitstring, m: bitstring; sdec(k, ad, senc(k, ad, m)) = m.
+
+(* Domain-separation constants of the contract *)
+const relayLabel: bitstring.   (* "privasys-session-relay/v1", section 4 *)
+const sessionInfo: bitstring.  (* "privasys-session/v1", section 5 *)
+const ratlsLabel: bitstring.   (* the RA-TLS bootstrap response *)
+const jwtLabel: bitstring.     (* the JWT claim set *)
+const rpId: bitstring.         (* the IdP origin the assertion is bound to *)
+const app: bitstring.          (* the audience *)
+
+(* Registered hardware credentials: (user, hardware public key) *)
+table creds(bitstring, pkey).
+
+(* Events *)
+event EnclaveBootstrap(digest, G, G, bitstring, key).         (* q, enc_pub, sdk_pub, session_id, K *)
+event WalletSigned(bitstring, digest, G, bitstring, G).       (* user, q, enc_pub, session_id, sdk_pub *)
+event IdPIssued(bitstring, digest, G, bitstring, G).          (* user, q, enc_pub, session_id, sdk_pub *)
+event SDKAccept(bitstring, digest, G, bitstring, G, key).     (* user, q, enc_pub, session_id, sdk_pub, K *)
+event EnclaveOpened(digest, bitstring, bitstring).            (* q, session_id, plaintext *)
+
+(* ---------- Enclave ----------
+   One process per app host: a long-lived identity key (section 8.7), a TEE-attested
+   TLS leaf, then any number of bootstraps. *)
+let Enclave(q: digest, privTEE: skey) =
+  new encpriv: exponent;
+  let encpub = exp(g, encpriv) in
+  out(c, encpub);
+  new leaf: skey;
+  out(c, (sign(privTEE, (q, pk(leaf))), pk(leaf)));
+  !(
+    in(c, (sdkpub: G, u: bitstring));
+    new sid: bitstring;
+    let K = hkdf(exp(sdkpub, encpriv), sid, sessionInfo) in
+    event EnclaveBootstrap(q, encpub, sdkpub, sid, K);
+    out(c, (sid, encpub, sign(leaf, (ratlsLabel, sdkpub, sid, encpub))));
+    in(c, ct: bitstring);
+    let m = sdec(K, sid, ct) in
+    event EnclaveOpened(q, sid, m)
+  ).
+
+(* ---------- Wallet ----------
+   Scans a QR, verifies the attestation of the enclave, bootstraps it over RA-TLS,
+   binds everything into the WebAuthn challenge and signs with the hardware credential. *)
+let Wallet(u: bitstring, hwk: skey, pubTEE: pkey) =
+  !(
+    in(c, (nonce: bitstring, sdkpub: G));                          (* QR payload *)
+    in(c, (att: bitstring, leafpub: pkey));                        (* RA-TLS handshake *)
+    let (q: digest, =leafpub) = checksign(att, pubTEE) in
+    out(c, (sdkpub, u));                                           (* POST session-bootstrap *)
+    in(c, (sid: bitstring, encpub: G, rsig: bitstring));
+    let (=ratlsLabel, =sdkpub, =sid, =encpub) = checksign(rsig, leafpub) in
+    let chal = h((relayLabel, nonce, sdkpub, q, encpub, sid)) in
+    event WalletSigned(u, q, encpub, sid, sdkpub);
+    out(c, (u, nonce, sdkpub, q, encpub, sid, sign(hwk, (rpId, chal))))
+  ).
+
+(* ---------- IdP ----------
+   Verifies the assertion against the registered credential, recomputes the binding
+   challenge from the query-string inputs, issues the JWT. *)
+let IdP(idpk: skey) =
+  !(
+    in(c, (u: bitstring, nonce: bitstring, sdkpub: G, q: digest, encpub: G, sid: bitstring, asrt: bitstring));
+    get creds(=u, hwpub) in
+    let (=rpId, chal: bitstring) = checksign(asrt, hwpub) in
+    if chal = h((relayLabel, nonce, sdkpub, q, encpub, sid)) then
+    event IdPIssued(u, q, encpub, sid, sdkpub);
+    out(c, sign(idpk, (jwtLabel, u, app, q, encpub, sid, hG(sdkpub))))
+  ).
+
+(* ---------- SDK ----------
+   Fresh key pair per session, the QR, then the JWT: signature, sdk_pub_bind, the
+   pinned attestation digest, and the session key. *)
+let SDK(qpol: digest, idppub: pkey) =
+  !(
+    new sdkpriv: exponent;
+    let sdkpub = exp(g, sdkpriv) in
+    new nonce: bitstring;
+    out(c, (nonce, sdkpub));
+    in(c, jwt: bitstring);
+    let (=jwtLabel, u: bitstring, =app, =qpol, encpub: G, sid: bitstring, =hG(sdkpub)) = checksign(jwt, idppub) in
+    let K = hkdf(exp(encpub, sdkpriv), sid, sessionInfo) in
+    event SDKAccept(u, qpol, encpub, sid, sdkpub, K);
+    new s: bitstring;
+    out(c, senc(K, sid, s))
+  ).
+
+(* ---------- Queries ---------- *)
+
+(* Sanity: the protocol completes. Expected: false, with a trace in which the SDK accepts. *)
+query u: bitstring, q: digest, e: G, sid: bitstring, sp: G, k: key;
+  event(SDKAccept(u, q, e, sid, sp, k)) ==> false.
+
+(* Sanity: the enclave opens a sealed message. Expected: false, with a trace. *)
+query q: digest, sid: bitstring, m: bitstring;
+  event(EnclaveOpened(q, sid, m)) ==> false.
+
+(* Secrecy of a sealed payload: a session accepted by the SDK is confidential. *)
+query attacker(new s).
+
+(* Key agreement: whatever the SDK derives, an honest enclave with the pinned
+   measurement derived the same key for the same SDK key and session id. *)
+query u: bitstring, q: digest, e: G, sid: bitstring, sp: G, k: key;
+  event(SDKAccept(u, q, e, sid, sp, k)) ==> event(EnclaveBootstrap(q, e, sp, sid, k)).
+
+(* Attestation agreement: the wallet of that user verified that enclave and bound this session. *)
+query u: bitstring, q: digest, e: G, sid: bitstring, sp: G, k: key;
+  event(SDKAccept(u, q, e, sid, sp, k)) ==> event(WalletSigned(u, q, e, sid, sp)).
+
+free idpk: skey [private].
+free privTEE: skey [private].
+
+process
+  out(c, pk(idpk));
+  out(c, pk(privTEE));
+  (
+    (* honest enclaves, each with its own measurement, and the SDKs that pin it *)
+    !( new q: digest; out(c, q); ( Enclave(q, privTEE) | SDK(q, pk(idpk)) ) )
+  | (* dishonest enclaves: the attacker gets attestation for any key under a fresh measurement *)
+    !( in(c, k: pkey); new qbad: digest; out(c, (qbad, sign(privTEE, (qbad, k)))) )
+  | (* users with registered hardware credentials; the credential leaks after the sessions *)
+    !( new u: bitstring; new hwk: skey; out(c, (u, pk(hwk))); insert creds(u, pk(hwk));
+       ( Wallet(u, hwk, pk(privTEE)) | phase 1; out(c, hwk) ) )
+  | IdP(idpk)
+  | (* the IdP signing key leaks after the sessions *)
+    phase 1; out(c, idpk)
+  )

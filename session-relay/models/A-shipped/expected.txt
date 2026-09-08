@@ -1,0 +1,5 @@
+not event(SDKAccept(u_5,q_4,e,sid_5,sp,k_1)) is false.
+not event(EnclaveOpened(q_4,sid_5,m_1)) is false.
+not attacker_bitstring_p1(s[jwt = v,!2 = v_1,!1 = v_2]) is true.
+event(SDKAccept(u_5,q_4,e,sid_5,sp,k_1)) ==> event(EnclaveBootstrap(q_4,e,sp,sid_5,k_1)) is true.
+event(SDKAccept(u_5,q_4,e,sid_5,sp,k_1)) ==> event(WalletSigned(u_5,q_4,e,sid_5,sp)) is true.

@@ -39,3 +39,30 @@ jobs:
         with:
           name: ${{ matrix.model }}-summary
           path: attested-tls-level3/work/${{ matrix.model }}/summary.txt
+  session-relay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - A-shipped
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ProVerif 2.05 from source
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y ocaml
+          curl -fsSL -o proverif2.05.tar.gz https://bblanche.gitlabpages.inria.fr/proverif/proverif2.05.tar.gz
+          tar xzf proverif2.05.tar.gz
+          (cd proverif2.05 && ./build -nointeract)
+          mkdir -p "$HOME/bin" && cp proverif2.05/proverif "$HOME/bin/proverif205"
+          "$HOME/bin/proverif205" -help 2>&1 | head -1 | grep -q "Proverif 2.05"
+      - name: Run model
+        run: bash ./session-relay/run.sh "$HOME/bin/proverif205" ${{ matrix.model }}
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-relay-${{ matrix.model }}-summary
+          path: session-relay/work/${{ matrix.model }}/summary.txt
